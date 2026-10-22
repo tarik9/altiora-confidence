@@ -1,0 +1,6 @@
+# Runtime
+pymupdf>=1.25,<2
+spacy>=3.7,<4
+PySide6-Essentials>=6.6
+# Build only
+pyinstaller>=6.6
