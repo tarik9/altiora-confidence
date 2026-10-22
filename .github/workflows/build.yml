@@ -1,6 +1,7 @@
 # Builds Altiora Confidence for Mac (Apple chips + Intel) and Windows on GitHub's machines.
 # Run it: GitHub -> Actions -> "Build Altiora Confidence" -> Run workflow.
 # Pushing a tag like v1.1 also publishes the files as a Release.
+# The project files can sit at the top of the repository or inside one sub-folder.
 name: Build Altiora Confidence
 
 on:
@@ -22,19 +23,27 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Build the app
-        run: bash build_mac.sh
+        run: |
+          SCRIPT="$(find . -name build_mac.sh -not -path './.git/*' | head -1)"
+          if [ -z "$SCRIPT" ]; then
+            echo "::error::build_mac.sh not found. Upload all the project files (app, packaging, build_mac.sh, main.py...) to the repository."
+            exit 1
+          fi
+          cd "$(dirname "$SCRIPT")"
+          echo "Project folder: $PWD"
+          bash build_mac.sh
       - name: Show the build log if something failed
         if: failure()
-        run: cat build/build-mac.log || true
+        run: find . -name build-mac.log -exec tail -60 {} \; || true
       - uses: actions/upload-artifact@v4
         with:
           name: Altiora-Confidence-mac-${{ matrix.label }}
-          path: output/*.dmg
+          path: "**/output/*.dmg"
           if-no-files-found: error
 
   windows:
@@ -42,23 +51,32 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install Inno Setup (makes the installer)
         run: choco install innosetup -y --no-progress
       - name: Build the installer
-        shell: cmd
-        run: call build_windows.bat
+        shell: pwsh
+        run: |
+          $script = Get-ChildItem -Recurse -Filter build_windows.bat | Select-Object -First 1
+          if (-not $script) {
+            Write-Output "::error::build_windows.bat not found. Upload all the project files to the repository."
+            exit 1
+          }
+          Set-Location $script.DirectoryName
+          Write-Output "Project folder: $PWD"
+          cmd /c build_windows.bat
+          exit $LASTEXITCODE
       - name: Show the build log if something failed
         if: failure()
-        shell: cmd
-        run: type build\build.log
+        shell: pwsh
+        run: Get-ChildItem -Recurse -Filter build.log | ForEach-Object { Get-Content $_.FullName -Tail 60 }
       - uses: actions/upload-artifact@v4
         with:
           name: Altiora-Confidence-windows
-          path: output/*
+          path: "**/output/*"
           if-no-files-found: error
 
   release:
@@ -75,4 +93,4 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: files/*
+          files: files/**/*
