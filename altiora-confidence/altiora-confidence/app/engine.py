@@ -29,7 +29,13 @@ from .patterns import (
     DATE_PATTERNS,
     DEFAULT_CATEGORIES,
     EXTRA_PATTERNS,
+    COMPANY_PATTERNS,
+    COMPANY_WORDS,
+    DEMONYMS,
+    FUNCTION_WORDS,
+    HEADING_WORDS,
     LABELS,
+    LEGAL_FORMS,
     NOT_NAMES,
     SIGNATURE_MARKERS,
     TITLE_PATTERN,
@@ -262,46 +268,145 @@ def _clean_name(ent_text):
     return t
 
 
-def _detect(pt, cats, lang, known_names, never_hide, use_ai):
-    text = pt.text
-    found, names = [], set()
+def _line_bounds(text, pos):
+    s = text.rfind("\n", 0, pos) + 1
+    e = text.find("\n", pos)
+    return s, (len(text) if e == -1 else e)
 
-    if "name" in cats or "org" in cats or "address" in cats:
-        if "name" in cats:
-            for m in re.finditer(TITLE_PATTERN, text):
-                s, e = m.span(2)
-                found.append((s, e, "name"))
-                names.add(m.group(2))
+
+def _clean_company(t):
+    """Trim function/heading words at the edges; None if nothing company-like remains."""
+    toks = t.split()
+    while toks and (toks[0].lower() in FUNCTION_WORDS or toks[0].lower() in HEADING_WORDS
+                    or toks[0].lower() in ("la", "le", "société", "societe", "entreprise", "cabinet", "groupe")):
+        toks = toks[1:]
+    while toks and toks[-1].lower() in FUNCTION_WORDS:
+        toks = toks[:-1]
+    if not toks:
+        return None
+    # at least one distinctive word (not just "SOLUTIONS", "Conseil"...)
+    if all(x.lower().strip(",.") in COMPANY_WORDS or x.lower() in NOT_NAMES or re.fullmatch(LEGAL_FORMS, x) for x in toks):
+        return None
+    return " ".join(toks)
+
+
+def _find_companies(text):
+    out = []
+    for p in COMPANY_PATTERNS:
+        for m in re.finditer(p, text):
+            frag = m.group(1)
+            if "\n" in frag:
+                frag = frag.split("\n")[0]
+            c = _clean_company(frag)
+            if c:
+                st = m.start(1) + frag.find(c)
+                out.append((st, st + len(c)))
+    # ALL-CAPS names containing a company word: "QUALISERO IT SOLUTIONS", "ALTIORA SOLUTIONS"
+    for m in re.finditer(r"\b[A-ZÀ-Ý][A-ZÀ-Ý0-9&'\-]+(?:[ \t]+[A-ZÀ-Ý0-9&'\-]{2,}){1,4}\b", text):
+        toks = m.group(0).split()
+        low = [t.lower() for t in toks]
+        if any(t in FUNCTION_WORDS for t in low) or low[0] in HEADING_WORDS:
+            continue
+        if not any(t in COMPANY_WORDS for t in low):
+            continue
+        c = _clean_company(m.group(0))
+        if c:
+            st = m.start() + m.group(0).find(c)
+            out.append((st, st + len(c)))
+    return out
+
+
+def _company_variants(found_texts):
+    """'QUALISERO IT SOLUTIONS' -> also catch 'QUALISERO' and 'ALTIORA SOLUTION' style variants elsewhere."""
+    keys = set()
+    for t in found_texts:
+        for tok in t.split():
+            tl = tok.lower().strip(",.")
+            if len(tl) >= 3 and tl not in COMPANY_WORDS and tl not in NOT_NAMES and tl not in FUNCTION_WORDS \
+                    and not re.fullmatch(LEGAL_FORMS, tok):
+                keys.add(tok.strip(",."))
+    tail = r"(?:\s+(?:" + "|".join(sorted(COMPANY_WORDS, key=len, reverse=True)) + r"|" + LEGAL_FORMS + r"))*"
+    return [re.compile(r"(?<![\wÀ-ÿ])" + re.escape(k) + r"(?i:" + tail + r")(?![\wÀ-ÿ])", re.IGNORECASE) for k in keys]
+
+
+def _detect(pt, cats, lang, known_names, never_hide, use_ai, known_orgs=None):
+    text = pt.text
+    found, names, orgs = [], set(), set()
+
+    if "name" in cats:
+        for m in re.finditer(TITLE_PATTERN, text):
+            s, e = m.span(2)
+            found.append((s, e, "name"))
+            names.add(m.group(2))
+
+    # Address patterns first: the AI's places are only "addresses" when they sit on an address line
+    addr_hits = []
+    if "address" in cats or "place" in cats:
+        _find_patterns(text, ADDRESS_PATTERNS, "address", addr_hits)
+    addr_lines = {_line_bounds(text, s) for s, _, _ in addr_hits}
+
+    def on_address_line(start):
+        ls, le = _line_bounds(text, start)
+        if (ls, le) in addr_lines:
+            return True
+        # a person's place of birth / residence: "né le 14/03/1985 à Lyon", "domicilié à Rabat", "born in Leeds"
+        if re.search(r"(?i)\b(n[ée]e?s?|domicili[ée]e?s?|demeurant|r[ée]sidant|born|living)\b[^\n]{0,40}$", text[ls:start]):
+            return True
+        # "…, 93800 Épinay-sur-Seine,\nFRANCE, représentée par…": first word of the next line
+        prev = _line_bounds(text, ls - 1) if ls > 0 else None
+        return prev in addr_lines and not text[ls:start].strip(" ,•-–")
+
+    if any(c in cats for c in ("name", "org", "address", "place")):
         nlp = load_nlp(lang) if use_ai else None
         if nlp is not None and text.strip():
             if getattr(pt, "_ents", None) is None:  # run the AI once per page, reuse on the 2nd pass
-                pt._ents = [(e.label_, e.text, e.start_char) for e in nlp(text).ents]
-            for label, ent_text, ent_start in pt._ents:
+                pt._ents = [(e.label_, e.text, e.start_char, any(t.pos_ == "PROPN" for t in e)) for e in nlp(text).ents]
+            for label, ent_text, ent_start, has_propn in pt._ents:
                 if label in ("PER", "PERSON"):
                     cat = "name"
                 elif label == "ORG":
                     cat = "org"
                 elif label in ("LOC", "GPE"):
-                    cat = "address"
+                    cat = "address" if on_address_line(ent_start) else "place"
                 else:
                     continue
                 if cat not in cats:
                     continue
+                # Places and companies must contain a real proper noun: drops "Fournir", "Prestation", "Conseil"
+                if cat in ("org", "address", "place") and not has_propn:
+                    continue
                 n = _clean_name(ent_text)
-                if n:
-                    s = ent_start + ent_text.find(n)
-                    found.append((s, s + len(n), cat))
-                    if cat == "name":
-                        names.add(n)
+                if not n:
+                    continue
+                if cat in ("address", "place") and n.lower() in DEMONYMS:
+                    continue
+                if cat == "org":
+                    n = _clean_company(n)
+                    if not n:
+                        continue
+                s = ent_start + ent_text.find(n)
+                found.append((s, s + len(n), cat))
+                if cat == "name":
+                    names.add(n)
+                elif cat == "org":
+                    orgs.add(n)
         if "name" in cats:
             for n in known_names:
                 for m in re.finditer(r"(?<![\wÀ-ÿ])" + re.escape(n) + r"(?![\wÀ-ÿ])", text, flags=re.IGNORECASE):
                     found.append((m.start(), m.end(), "name"))
 
+    if "org" in cats:
+        for s, e in _find_companies(text):
+            found.append((s, e, "org"))
+            orgs.add(text[s:e])
+        for rx in known_orgs or []:
+            for m in rx.finditer(text):
+                found.append((m.start(), m.end(), "org"))
+
     if "date" in cats:
         _find_patterns(text, DATE_PATTERNS, "date", found, re.IGNORECASE)
     if "address" in cats:
-        _find_patterns(text, ADDRESS_PATTERNS, "address", found)
+        found += addr_hits
     for cat in ("email", "phone", "id"):
         if cat in cats:
             _find_patterns(text, EXTRA_PATTERNS[cat], cat, found, re.IGNORECASE if cat == "email" else 0)
@@ -309,11 +414,12 @@ def _detect(pt, cats, lang, known_names, never_hide, use_ai):
     if never_hide:
         keep = {k.lower() for k in never_hide}
         found = [f for f in found if text[f[0]:f[1]].strip().lower() not in keep]
+    pt._orgs = orgs
     return found, names
 
 
 def _merge(found):
-    priority = {c: i for i, c in enumerate(["email", "id", "phone", "date", "name", "address", "org", "signature"])}
+    priority = {c: i for i, c in enumerate(["email", "id", "phone", "date", "name", "address", "org", "place", "signature"])}
     found = sorted(found, key=lambda f: (f[0], -(f[1] - f[0]), priority.get(f[2], 99)))
     merged = []
     for s, e, c in found:
@@ -405,18 +511,21 @@ def analyze(path, options: Options | None = None, progress=None, cancel=None) ->
     tick(n, "Chargement du modèle IA…")
     ai_ok = (load_nlp(lang) is not None) if options.use_ai else False
 
-    names = set(options.always_hide)
+    names, orgs = set(options.always_hide), set()
     for pt in pages:
         _, found_names = _detect(pt, cats, lang, [], options.never_hide, options.use_ai)
         names |= found_names
+        orgs |= getattr(pt, "_orgs", set())
     known = _propagate(names, options.never_hide)
+    keep_l = {k.lower() for k in options.never_hide}
+    known_orgs = _company_variants([o for o in orgs if o.lower() not in keep_l]) if "org" in cats else []
 
     hits = []
     for pt in pages:
         i = pt.page.number
         tick(n + 1 + i, f"Analyse de la page {i + 1}/{n}")
         page = pt.page
-        found, _ = _detect(pt, cats, lang, known, options.never_hide, options.use_ai)
+        found, _ = _detect(pt, cats, lang, known, options.never_hide, options.use_ai, known_orgs)
         pad = 1.5 if pt.ocr_used else 0.5
         for s, e, c in _merge(found):
             rects = [_pad(r, pad, page.rect) for r in pt.rects_for(s, e)]

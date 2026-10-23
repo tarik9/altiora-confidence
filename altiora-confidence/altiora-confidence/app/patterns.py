@@ -9,6 +9,7 @@ LABELS = {
     "phone": "[TÉL]",
     "id": "[ID]",
     "org": "[SOCIÉTÉ]",
+    "place": "[LIEU]",
     "manual": "[MASQUÉ]",
 }
 
@@ -22,10 +23,11 @@ COLORS = {
     "phone": (0.85, 0.6, 1),
     "id": (0.85, 0.6, 1),
     "org": (1, 0.7, 0.3),
+    "place": (0.55, 0.85, 0.75),
     "manual": (1, 0.45, 0.75),
 }
 
-ALL_CATEGORIES = ["name", "date", "address", "signature", "email", "phone", "id", "org", "manual"]
+ALL_CATEGORIES = ["name", "date", "address", "signature", "email", "phone", "id", "org", "place", "manual"]
 
 CATEGORY_NAMES = {
     "name": "Noms",
@@ -36,6 +38,7 @@ CATEGORY_NAMES = {
     "phone": "Téléphones",
     "id": "Numéros (IBAN, CIN, ICE…)",
     "org": "Sociétés",
+    "place": "Villes et pays (hors adresses)",
     "manual": "Ajouts manuels",
 }
 DEFAULT_CATEGORIES = ["name", "date", "address", "signature", "email", "phone", "id"]
@@ -153,3 +156,61 @@ TITLE_PATTERN = (
     r"\s+((?:[A-ZÀ-Ý][A-Za-zÀ-ÿ'\-]+|[A-ZÀ-Ý]\.)(?:\s+(?:el|al|de|du|des|la|le|ben|bin|ibn|van|von|da|di|[A-ZÀ-Ý][A-Za-zÀ-ÿ'\-]+)){0,4})"
 )
 
+
+
+# --------------------------------------------------------------------------------------
+# Places and companies
+# --------------------------------------------------------------------------------------
+
+# Nationalities / demonyms: capitalised adjectives the AI sometimes takes for places ("heure Malgache")
+DEMONYMS = {
+    w.lower()
+    for w in """
+    malgache malgaches français française françaises marocain marocaine marocains marocaines
+    algérien algérienne tunisien tunisienne sénégalais sénégalaise ivoirien ivoirienne camerounais camerounaise
+    belge belges suisse suisses canadien canadienne espagnol espagnole italien italienne allemand allemande
+    anglais anglaise britannique américain américaine européen européenne africain africaine
+    arabe chinois chinoise indien indienne portugais portugaise néerlandais néerlandaise
+    french moroccan malagasy spanish italian german british american european african
+    """.split()
+}
+
+LEGAL_FORMS = r"(?:SARLAU|SARL|SASU|SAS|SA|EURL|SNC|SCI|SCS|SCOP|SCP|S\.A\.R\.L\.|S\.A\.S\.|S\.A\.|GmbH|Ltd\.?|LLC|Inc\.?|PLC|BV|SpA|SRL|SL)"
+
+# Words that typically end or appear in company names
+COMPANY_WORDS = {
+    w.lower()
+    for w in """
+    solution solutions consulting consultants consultant conseil conseils group groupe services service
+    technology technologies technologie technologies tech systems system systèmes système informatique it
+    international partners partner holding industries industrie digital numérique software labs lab ventures
+    capital finance invest investissement immobilier logistics logistique transport transports distribution
+    trading media médias communication communications agency agence studio studios network networks data
+    cloud security sécurité associés associates company corporation corp ingénierie engineering expertise
+    management formation academy académie innovation innovations interactive web
+    """.split()
+}
+
+# Capitalised words that start headings, never a company ("CONTRAT DE SERVICES", "ARTICLE")
+HEADING_WORDS = {
+    w.lower()
+    for w in """
+    contrat convention accord avenant annexe article conditions générales particulières objet prix facturation
+    durée résiliation confidentialité propriété responsabilité obligations prestations prestation services
+    devis facture bon commande proposition offre cahier charges sommaire préambule entre parties
+    contract agreement schedule appendix terms invoice
+    """.split()
+}
+
+FUNCTION_WORDS = {"de", "des", "du", "la", "le", "les", "et", "en", "à", "au", "aux", "pour", "par", "sur", "of", "and", "the", "for"}
+
+_CAP = r"(?:[A-ZÀ-Ý][A-Za-zÀ-ÿ'&\-]+|[A-Z]{2,}|&)"
+COMPANY_PATTERNS = [
+    # "QUALISERO IT SOLUTIONS, SARL" / "ACME Conseil SAS"
+    r"\b(" + _CAP + r"(?:\s+" + _CAP + r"){0,4})(?=,?\s+" + LEGAL_FORMS + r"\b)",
+    # "SARL ACME Conseil"
+    r"(?<=\b" + r"SARL\s)(" + _CAP + r"(?:\s+" + _CAP + r"){0,4})",
+    r"(?<=\bSAS\s)(" + _CAP + r"(?:\s+" + _CAP + r"){0,4})",
+    # "la société Globex Conseil" / "le cabinet Martin & Associés"
+    r"(?i:\b(?:soci[ée]t[ée]|entreprise|cabinet|groupe|firme|company|agence)\s+)(" + _CAP + r"(?:\s+" + _CAP + r"){0,4})",
+]
